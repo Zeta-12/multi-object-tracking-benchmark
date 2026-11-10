@@ -5,9 +5,10 @@ from __future__ import annotations
 import inspect
 
 from mot_bench.trackers.bytetrack import ByteTrack
+from mot_bench.trackers.ocsort import OCSort
 from mot_bench.trackers.sort import Sort
 
-TRACKERS = {"sort": Sort, "bytetrack": ByteTrack}
+TRACKERS = {"sort": Sort, "bytetrack": ByteTrack, "ocsort": OCSort}
 
 
 def make(name: str, params: dict | None = None, frame_rate: float | None = None):

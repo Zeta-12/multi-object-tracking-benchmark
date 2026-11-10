@@ -124,7 +124,7 @@ def summary_table(runs_dir: Path, dataset: str, split: str) -> str:
     }
     if not rows:
         raise SystemExit(f"no evaluated run in {split_dir}")
-    return evaluate.table(rows, ["HOTA", "DetA", "AssA", "MOTA", "IDF1", "IDSW", "FP", "FN"], first="run")
+    return evaluate.table(rows, ["HOTA", "DetA", "AssA", "LocA", "MOTA", "IDF1", "IDSW", "FP", "FN"], first="run")
 
 
 def main(argv: list[str] | None = None) -> None:

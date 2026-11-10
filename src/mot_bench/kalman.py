@@ -57,8 +57,12 @@ class SortBox:
     P0 = np.diag([10.0, 10.0, 10.0, 10.0, 1e4, 1e4, 1e4])
 
     def __init__(self, box: np.ndarray):
-        self.x = np.r_[tlbr_to_xysr(box), 0.0, 0.0, 0.0]
+        self.x = np.r_[self.measure(box), 0.0, 0.0, 0.0]
         self.P = self.P0.copy()
+
+    @staticmethod
+    def measure(box: np.ndarray) -> np.ndarray:
+        return tlbr_to_xysr(box)
 
     def predict(self) -> None:
         if self.x[2] + self.x[6] <= 0:
@@ -66,11 +70,70 @@ class SortBox:
         self.x, self.P = predict(self.x, self.P, self.F, self.Q)
 
     def update(self, box: np.ndarray) -> None:
-        self.x, self.P = update(self.x, self.P, tlbr_to_xysr(box), self.H, self.R)
+        self.x, self.P = update(self.x, self.P, self.measure(box), self.H, self.R)
 
     @property
     def box(self) -> np.ndarray:
         return xysr_to_tlbr(self.x)
+
+
+class OruBox(SortBox):
+    """SortBox with the observation-centric re-update (ORU) of OC-SORT.
+
+    On the first frame without a detection the state is kept aside. When a detection comes back, the filter
+    goes back to that state and runs the gap again on a virtual box moving in a straight line, at constant
+    speed, from the last detection to the new one: one update and one predict per missed frame. The new
+    detection is then applied as usual, so it counts twice, as in the reference. Without this, the velocity
+    learnt before an occlusion keeps pushing the box for the whole gap.
+    """
+
+    def __init__(self, box: np.ndarray, replay: bool = True):
+        super().__init__(box)
+        self.replay_gaps = replay
+        self.observed = False
+        self.saved = None
+        self.steps = 0
+        self.last_z = None
+        self.last_step = -1
+
+    @staticmethod
+    def measure(box: np.ndarray) -> np.ndarray:
+        # the reference adds 1e-6 to the height in the ratio
+        w, h = box[2] - box[0], box[3] - box[1]
+        return np.array([box[0] + w / 2.0, box[1] + h / 2.0, w * h, w / (h + 1e-6)])
+
+    def miss(self) -> None:
+        if self.observed:
+            self.saved = (self.x.copy(), self.P.copy())
+        self.observed = False
+        self.steps += 1
+
+    def update(self, box: np.ndarray) -> None:
+        z = last = self.measure(box)
+        if self.replay_gaps and not self.observed and self.saved is not None:
+            last = self.replay(z)
+        self.observed = True
+        self.x, self.P = update(self.x, self.P, z, self.H, self.R)
+        self.last_z, self.last_step = last, self.steps
+        self.steps += 1
+
+    def replay(self, z: np.ndarray) -> np.ndarray:
+        """Re-runs the gap since the last detection, returns the last virtual measurement."""
+        self.x, self.P = self.saved
+        self.saved = None
+        gap = self.steps - self.last_step
+        x1, y1, s1, r1 = self.last_z
+        x2, y2, s2, r2 = z
+        w1, h1 = np.sqrt(s1 * r1), np.sqrt(s1 / r1)
+        w2, h2 = np.sqrt(s2 * r2), np.sqrt(s2 / r2)
+        dx, dy, dw, dh = (x2 - x1) / gap, (y2 - y1) / gap, (w2 - w1) / gap, (h2 - h1) / gap
+        for i in range(1, gap + 1):
+            w, h = w1 + i * dw, h1 + i * dh
+            v = np.array([x1 + i * dx, y1 + i * dy, w * h, w / h])
+            self.x, self.P = update(self.x, self.P, v, self.H, self.R)
+            if i < gap:
+                self.x, self.P = predict(self.x, self.P, self.F, self.Q)
+        return v
 
 
 class XyahBox:

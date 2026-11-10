@@ -7,7 +7,7 @@ NumPy, and compared on MOT17 and MOT20 with [TrackEval](https://github.com/Jonat
 IDF1). All trackers get the same detections, so the differences come from the association step only, and each
 implementation has to match the numbers published by its authors on the same split.
 
-Work in progress: the data, the evaluation, SORT and ByteTrack are in place. OC-SORT, DeepSORT and BoT-SORT come
+Work in progress: the data, the evaluation, SORT, ByteTrack and OC-SORT are in place. DeepSORT and BoT-SORT come
 next.
 
 ## Setup
@@ -115,6 +115,39 @@ uv run mot track --tracker bytetrack --split train --name bytetrack-all
 uv run mot compare runs/MOT17-train/bytetrack-all/data <out>
 ```
 
+OC-SORT (Cao et al., 2023) keeps the Kalman filter of SORT and adds three steps that trust the detections more than
+the filter:
+
+- ORU: when a lost track gets a detection again, its filter goes back to its state on the first missed frame and
+  runs the gap again on a straight line between the two detections (`kalman.OruBox`);
+- OCM: the cost adds inertia x score x (pi/2 - angle) / pi, where angle is between the motion of the track and
+  the direction from its detection of 3 frames ago to each new detection;
+- OCR: the tracks and detections left over are matched again on the IoU with the last detection of the track
+  instead of its prediction.
+
+Lost tracks are kept 30 frames, only the detections over 0.6 are used, and the reported box is the detection
+itself, not the Kalman state. Details of the reference code kept here:
+
+- after a gap the new detection is applied twice, once at the end of the virtual line and once for real;
+- the measurement adds 1e-6 to the height in the w/h ratio;
+- a new track is reported from its 4th detection, as in SORT;
+- "no detection yet" is a box of -1 tested with sum() < 0, and the direction term is only used when the old
+  detection has a score >= 0;
+- the output skips boxes under 100 px2 or more than 1.6 times wider than tall, as in the evaluation script.
+
+On the 21 MOT17 training sequences the output is the same as the reference
+([noahcao/OC_SORT](https://github.com/noahcao/OC_SORT) at 2d34c67, the 2022 code of the paper, run with lap): the
+same 156,787 boxes and the same tracks. The 2026 refactor of that repo (8462e7e) gives the same files, and so does
+the `use_byte` option (169,118 boxes).
+
+```
+# in a venv with numpy, scipy, lap and filterpy
+python tools/ocsort_reference.py <OC_SORT clone> data/MOT17/train <out>
+# here
+uv run mot track --tracker ocsort --split train --name ocsort-all
+uv run mot compare runs/MOT17-train/ocsort-all/data <out>
+```
+
 I wrote the trackers with the help of an AI assistant. Each one is checked against its reference implementation,
 as above, before its results are reported here.
 
@@ -129,14 +162,20 @@ a grid on `train_half` (`mot summary` prints these numbers from the runs):
 | SORT | tuned | DPM | 31.9 | 28.1 | 36.6 | 26.5 | 39.7 | 637 |
 | ByteTrack | reference | DPM | 30.1 | 21.4 | 42.4 | 26.4 | 36.9 | 116 |
 | ByteTrack | tuned | DPM | 33.0 | 25.9 | 42.3 | 30.3 | 41.2 | 139 |
+| OC-SORT | reference | DPM | 25.3 | 16.7 | 38.6 | 20.7 | 30.7 | 105 |
+| OC-SORT | tuned | DPM | 31.1 | 27.7 | 35.3 | 26.3 | 39.1 | 563 |
 | SORT | reference | FRCNN | 48.7 | 42.7 | 55.8 | 46.7 | 54.6 | 252 |
 | SORT | tuned | FRCNN | 51.4 | 43.3 | 61.4 | 47.4 | 58.6 | 371 |
 | ByteTrack | reference | FRCNN | 49.4 | 42.5 | 57.7 | 47.5 | 56.2 | 198 |
 | ByteTrack | tuned | FRCNN | 50.1 | 42.5 | 59.2 | 47.6 | 57.1 | 178 |
+| OC-SORT | reference | FRCNN | 49.8 | 41.9 | 59.4 | 46.0 | 56.2 | 154 |
+| OC-SORT | tuned | FRCNN | 50.5 | 43.1 | 59.3 | 47.4 | 56.5 | 241 |
 | SORT | reference | SDP | 53.9 | 52.6 | 55.4 | 60.0 | 62.6 | 367 |
 | SORT | tuned | SDP | 56.9 | 54.3 | 59.7 | 62.4 | 67.5 | 471 |
 | ByteTrack | reference | SDP | 56.4 | 54.1 | 59.0 | 62.9 | 67.4 | 282 |
 | ByteTrack | tuned | SDP | 56.3 | 54.4 | 58.3 | 63.3 | 67.5 | 342 |
+| OC-SORT | reference | SDP | 53.6 | 50.0 | 57.5 | 58.9 | 66.0 | 284 |
+| OC-SORT | tuned | SDP | 54.8 | 52.9 | 56.9 | 62.3 | 66.9 | 491 |
 
 Tuned settings:
 
@@ -144,20 +183,40 @@ Tuned settings:
 |---|---|---|---|
 | SORT: min_score, max_age, min_hits | -0.25, 120, 1 | 0.6, 60, 0 | 0.6, 60, 1 |
 | ByteTrack: track_thresh, track_buffer, match_thresh | 0.25, 30, 0.95 (low_thresh -0.5) | 0.7, 120, 0.95 | 0.4, 60, 0.8 |
+| OC-SORT: det_thresh, max_age, min_hits, iou_threshold, inertia | -0.25, 30, 1, 0.2, 0 | 0.8, 120, 0, 0.2, 0.2 | 0.6, 60, 1, 0.2, 0.1 |
 
-1. **With the public detections, a tuned SORT is level with ByteTrack** (HOTA 51.4 vs 50.1 with FRCNN, 56.9
-   vs 56.3 with SDP, 31.9 vs 33.0 with DPM). Most of the gap at the reference settings comes from the lost
-   tracks: SORT drops a track after one missed frame, ByteTrack keeps it 30 frames. ByteTrack still switches
-   ids less often (178 vs 371 with FRCNN).
+1. **With the public detections, the three trackers are within about 2 HOTA points of each other once tuned**,
+   while the detector moves HOTA by 25 points. A tuned SORT is first with FRCNN (51.4, OC-SORT 50.5, ByteTrack
+   50.1) and SDP (56.9, ByteTrack 56.3, OC-SORT 54.8), ByteTrack with DPM (33.0, SORT 31.9, OC-SORT 31.1). Most of the gap at the
+   reference settings comes from the lost tracks: SORT drops a track after one missed frame, the two others keep
+   it 30 frames. ByteTrack still switches ids less often (178 vs 371 for SORT with FRCNN).
 2. **ByteTrack's second association needs low score boxes.** Turning it off (`low_thresh=0.6`) costs 0.2 HOTA
    with FRCNN and SDP, and 2.0 with DPM. Only 4.4% of the FRCNN detections and 2.8% of the SDP ones are between
    0.1 and 0.6, against 16.6% for DPM. 70% of the FRCNN scores are exactly 1.0 and SDP has none under 0.4. The
    ByteTrack paper gets its gains on YOLOX boxes kept down to a score of 0.1, which come next here.
-3. The tops of the grids are flat: on `train_half` the five best points are within 0.3 HOTA, so the pick
+3. **ORU, OCM and OCR don't help on these detections.** Turned off one at a time, each moves HOTA by at most 0.4
+   with FRCNN and SDP, in both directions (table below). Pedestrians in MOT17 mostly walk in straight lines,
+   and the OC-SORT paper shows its gains on YOLOX detections and on dance videos with more erratic motion.
+4. **Reporting the detection instead of the Kalman box costs OC-SORT 1.7 HOTA with SDP** (53.6 vs 55.3, LocA
+   85.9 vs 87.7). The SDP boxes are the noisiest and the filter smooths them. With FRCNN the detection is a bit
+   better (49.8 vs 49.6).
+5. The tops of the grids are flat: on `train_half` the five best points are within 0.3 HOTA, so the pick
    between them is mostly noise. Tuning ByteTrack with SDP gives nothing on `val_half` (56.3 vs 56.4).
 
+OC-SORT at the reference settings with one part changed, HOTA on MOT17 `val_half`:
+
+| | DPM | FRCNN | SDP |
+|---|---|---|---|
+| OC-SORT | 25.3 | 49.8 | 53.6 |
+| without ORU (`oru=false`) | 25.3 | 49.6 | 53.6 |
+| without OCM (`inertia=0`) | 26.0 | 49.7 | 53.4 |
+| without OCR (`ocr=false`) | 25.1 | 50.2 | 53.8 |
+| Kalman box reported (`kalman_box=true`) | 25.8 | 49.6 | 55.3 |
+
 The DPM scores aren't calibrated (-0.5 to 4.8). SORT keeps all of them at the reference settings, negative ones
-included, and ByteTrack's thresholds are made for scores between 0 and 1: its tuned run lowers them.
+included. The thresholds of ByteTrack and OC-SORT are made for scores between 0 and 1: at 0.6, OC-SORT keeps only
+a third of the DPM boxes. The tuned runs lower them, to 0.25 for ByteTrack (low_thresh -0.5) and -0.25 for
+OC-SORT.
 
 MOT20 `val_half`, public detections:
 
@@ -168,7 +227,8 @@ MOT20 `val_half`, public detections:
 
 In the crowds of MOT20 people are hidden all the time, and keeping the lost tracks gives 11 points of HOTA. The
 MOT20 detection scores are rounded to 0 or 1 (99% are 0 in MOT20-05), so there is no score threshold to tune, and
-ByteTrack, which splits the detections by score, can't use them. It will run on the YOLOX detections.
+ByteTrack and OC-SORT, which split or filter the detections by score, can't use them. They will run on the YOLOX
+detections.
 
 ## Layout
 
@@ -180,7 +240,7 @@ src/mot_bench/
   boxes.py        box formats, IoU
   kalman.py       Kalman filter and box state models
   matching.py     Hungarian assignment
-  trackers/       SORT, ByteTrack
+  trackers/       SORT, ByteTrack, OC-SORT
   tune.py         grid search on train_half
   run.py          runs a tracker over a split, writes the result files
   evaluate.py     TrackEval (HOTA, CLEAR, Identity)
@@ -188,6 +248,7 @@ src/mot_bench/
   cli.py          `mot` command
 tools/
   bytetrack_reference.py   runs the official ByteTrack tracker on the same detections
+  ocsort_reference.py      same for OC-SORT
 ```
 
 ## Data and licences
