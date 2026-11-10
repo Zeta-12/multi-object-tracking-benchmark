@@ -9,27 +9,31 @@
 
 The covariance update is the Joseph form: same result as P - K H P in exact arithmetic, but it stays
 symmetric and positive definite with rounding errors. filterpy, used by the SORT reference code, does the same.
+DeepSORT and ByteTrack use the short form P - K S K' (joseph=False).
 """
 
 from __future__ import annotations
 
 import numpy as np
 
-from mot_bench.boxes import tlbr_to_xysr, xysr_to_tlbr
+from mot_bench.boxes import tlbr_to_xyah, tlbr_to_xysr, xyah_to_tlbr, xysr_to_tlbr
 
 
 def predict(x: np.ndarray, P: np.ndarray, F: np.ndarray, Q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return F @ x, F @ P @ F.T + Q
 
 
-def update(x: np.ndarray, P: np.ndarray, z: np.ndarray, H: np.ndarray, R: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def update(
+    x: np.ndarray, P: np.ndarray, z: np.ndarray, H: np.ndarray, R: np.ndarray, joseph: bool = True
+) -> tuple[np.ndarray, np.ndarray]:
     S = H @ P @ H.T + R
     # K = P H' S^-1, P and S are symmetric
     K = np.linalg.solve(S, H @ P).T
     x = x + K @ (z - H @ x)
-    I_KH = np.eye(len(x)) - K @ H
-    P = I_KH @ P @ I_KH.T + K @ R @ K.T
-    return x, P
+    if joseph:
+        I_KH = np.eye(len(x)) - K @ H
+        return x, I_KH @ P @ I_KH.T + K @ R @ K.T
+    return x, P - K @ S @ K.T
 
 
 def constant_velocity(n: int, moving: int) -> np.ndarray:
@@ -67,3 +71,39 @@ class SortBox:
     @property
     def box(self) -> np.ndarray:
         return xysr_to_tlbr(self.x)
+
+
+class XyahBox:
+    """State (x, y, a, h, vx, vy, va, vh): centre, w/h ratio and height, with their velocities.
+
+    The model of DeepSORT, reused by ByteTrack. The noise follows the box height: std of h/20 on the
+    position and h/160 on the velocity, so a small far away pedestrian is expected to move fewer pixels.
+    The ratio gets small fixed values. The noise values are the ones of the DeepSORT code.
+    """
+
+    F = constant_velocity(4, 4)
+    H = np.eye(4, 8)
+    POS = 1 / 20
+    VEL = 1 / 160
+
+    def __init__(self, box: np.ndarray):
+        z = tlbr_to_xyah(box)
+        h = z[3]
+        self.x = np.r_[z, 0.0, 0.0, 0.0, 0.0]
+        std = [2 * self.POS * h, 2 * self.POS * h, 1e-2, 2 * self.POS * h]
+        std += [10 * self.VEL * h, 10 * self.VEL * h, 1e-5, 10 * self.VEL * h]
+        self.P = np.diag(np.square(std))
+
+    def predict(self) -> None:
+        h = self.x[3]
+        std = [self.POS * h, self.POS * h, 1e-2, self.POS * h, self.VEL * h, self.VEL * h, 1e-5, self.VEL * h]
+        self.x, self.P = predict(self.x, self.P, self.F, np.diag(np.square(std)))
+
+    def update(self, box: np.ndarray) -> None:
+        h = self.x[3]
+        R = np.diag(np.square([self.POS * h, self.POS * h, 1e-1, self.POS * h]))
+        self.x, self.P = update(self.x, self.P, tlbr_to_xyah(box), self.H, R, joseph=False)
+
+    @property
+    def box(self) -> np.ndarray:
+        return xyah_to_tlbr(self.x)

@@ -59,10 +59,11 @@ def run(
     out_dir: Path,
     min_score: float | None = None,
 ) -> list[SeqRun]:
-    """Results go to out_dir/data/<seq>.txt, the TrackEval layout. A new tracker is built for every sequence."""
+    """Results go to out_dir/data/<seq>.txt, the TrackEval layout. A new tracker is built for every sequence,
+    with the frame rate of the video if it takes one."""
     runs = []
     for seq in seqs:
-        rows, info = track_sequence(trackers.make(tracker, **params), seq, min_score)
+        rows, info = track_sequence(trackers.make(tracker, params, seq.info.fps), seq, min_score)
         mot.write_results(out_dir / "data" / f"{seq.name}.txt", rows)
         log.info("%s: %d boxes, %.0f fps", seq.name, len(rows), info.fps)
         runs.append(info)

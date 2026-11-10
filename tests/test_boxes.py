@@ -34,3 +34,18 @@ def test_iou_is_symmetric(seed):
     m = boxes.iou(b, b)
     np.testing.assert_allclose(m, m.T)
     np.testing.assert_allclose(np.diag(m), 1)
+
+
+def test_xyah_round_trip():
+    tlbr = np.array([10.0, 20.0, 40.0, 80.0])
+    x = boxes.tlbr_to_xyah(tlbr)
+    assert x.tolist() == [25, 50, 0.5, 60]
+    np.testing.assert_allclose(boxes.xyah_to_tlbr(x), tlbr)
+
+
+def test_iou_plus_one():
+    # with the pixel convention, 0..9 is 10 pixels wide
+    a = np.array([[0, 0, 9, 9]])
+    b = np.array([[0, 0, 9, 9], [5, 0, 14, 9], [10, 0, 19, 9]])
+    np.testing.assert_allclose(boxes.iou(a, b, plus_one=True), [[1, 1 / 3, 0]])
+    np.testing.assert_allclose(boxes.iou(a, b), [[1, 36 / 126, 0]])

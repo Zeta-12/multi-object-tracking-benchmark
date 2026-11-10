@@ -79,8 +79,8 @@ def evaluate(gt_dir: Path, results_dir: Path, seq_lengths: dict[str, int], bench
     return {("COMBINED" if seq == "COMBINED_SEQ" else seq): _summary(r["pedestrian"]) for seq, r in per_seq.items()}
 
 
-def table(metrics: dict[str, dict], columns: list[str] = COLUMNS) -> str:
-    rows = [["sequence", *columns]]
+def table(metrics: dict[str, dict], columns: list[str] = COLUMNS, first: str = "sequence") -> str:
+    rows = [[first, *columns]]
     for name, m in metrics.items():
         rows.append([name] + [f"{100 * m[c]:.1f}" if isinstance(m[c], float) else str(m[c]) for c in columns])
     widths = [max(len(r[i]) for r in rows) for i in range(len(rows[0]))]

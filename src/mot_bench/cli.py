@@ -28,19 +28,50 @@ def parse_params(items: list[str]) -> dict:
     params = {}
     for item in items:
         key, _, value = item.partition("=")
-        try:
-            params[key] = json.loads(value)
-        except json.JSONDecodeError:
-            params[key] = value
+        params[key] = parse_value(value)
     return params
 
 
-def track(args) -> None:
-    from mot_bench import evaluate, mot, run
+def parse_value(value: str):
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return value
 
-    seqs = mot.sequences(args.data_dir, args.dataset, args.split, args.detector)
+
+def parse_grid(items: list[str]) -> dict[str, list]:
+    """["min_score=0,0.5", "max_age=1,3"] -> {"min_score": [0, 0.5], "max_age": [1, 3]}"""
+    space = {}
+    for item in items:
+        key, _, values = item.partition("=")
+        space[key] = [parse_value(v) for v in values.split(",")]
+    return space
+
+
+def load_sequences(args, split: str) -> list:
+    from mot_bench import mot
+
+    seqs = mot.sequences(args.data_dir, args.dataset, split, args.detector)
     if not seqs:
-        raise SystemExit(f"no sequence in {args.data_dir}/{args.dataset}/{args.split} for detector {args.detector}")
+        raise SystemExit(f"no sequence in {args.data_dir}/{args.dataset}/{split} for detector {args.detector}")
+    return seqs
+
+
+def evaluate_run(args, split: str, seqs: list, runs: list, out_dir: Path) -> dict:
+    """Scores out_dir against the ground truth of the split and writes metrics.json."""
+    from mot_bench import evaluate
+
+    split_dir = Path(args.data_dir) / args.dataset / split
+    metrics = evaluate.evaluate(split_dir, out_dir, {s.name: s.info.length for s in seqs}, args.dataset)
+    report = {"metrics": metrics, "timing": {r.name: {"frames": r.frames, "seconds": r.seconds} for r in runs}}
+    (out_dir / "metrics.json").write_text(json.dumps(report, indent=2) + "\n")
+    return metrics
+
+
+def track(args) -> None:
+    from mot_bench import evaluate, run
+
+    seqs = load_sequences(args, args.split)
     name = args.name or f"{args.tracker}-{args.detector or 'all'}"
     out_dir = args.out / f"{args.dataset}-{args.split}" / name
     runs = run.run(seqs, args.tracker, parse_params(args.param), out_dir, args.min_score)
@@ -48,11 +79,52 @@ def track(args) -> None:
     print(f"{name}: {sum(r.frames for r in runs)} frames, tracker alone at {fps:.0f} fps")
     if args.split == "test":
         return
-    split_dir = Path(args.data_dir) / args.dataset / args.split
-    metrics = evaluate.evaluate(split_dir, out_dir, {s.name: s.info.length for s in seqs}, args.dataset)
-    report = {"metrics": metrics, "timing": {r.name: {"frames": r.frames, "seconds": r.seconds} for r in runs}}
-    (out_dir / "metrics.json").write_text(json.dumps(report, indent=2) + "\n")
-    print(evaluate.table(metrics))
+    print(evaluate.table(evaluate_run(args, args.split, seqs, runs, out_dir)))
+
+
+def tune(args) -> None:
+    from mot_bench import evaluate, run
+    from mot_bench import tune as grid_search
+
+    space = parse_grid(args.grid)
+    if not space:
+        raise SystemExit("nothing to tune, pass at least one --grid key=v1,v2,...")
+    name = args.name or f"{args.tracker}-{args.detector or 'all'}-tuned"
+    train_dir = args.out / f"{args.dataset}-train_half" / name
+    rows = grid_search.search(
+        load_sequences(args, "train_half"), args.tracker, space, train_dir, args.dataset, args.jobs
+    )
+    grid_search.write_csv(rows, train_dir / "grid.csv")
+
+    columns = ["HOTA", "DetA", "AssA", "MOTA", "IDF1", "IDSW"]
+    top = sorted(rows, key=lambda r: r[args.metric], reverse=True)[:5]
+    label = {" ".join(f"{k}={r[k]}" for k in space): r for r in top}
+    print(f"train_half, best {len(top)} of {len(rows)} by {args.metric}:")
+    print(evaluate.table(label, columns, first="point"))
+
+    point = {k: v for k, v in grid_search.best(rows, args.metric).items() if k in space}
+    params, min_score = grid_search.split_point(point)
+    seqs = load_sequences(args, "val_half")
+    out_dir = args.out / f"{args.dataset}-val_half" / name
+    runs = run.run(seqs, args.tracker, params, out_dir, min_score)
+    tuning = {"tuned_on": "train_half", "metric": args.metric, "grid": space, "best": point}
+    (out_dir / "tuning.json").write_text(json.dumps(tuning, indent=2) + "\n")
+    print(f"val_half with {point}:")
+    print(evaluate.table(evaluate_run(args, "val_half", seqs, runs, out_dir)))
+
+
+def summary_table(runs_dir: Path, dataset: str, split: str) -> str:
+    """COMBINED metrics of every run in runs/<dataset>-<split>."""
+    from mot_bench import evaluate
+
+    split_dir = Path(runs_dir) / f"{dataset}-{split}"
+    rows = {
+        p.parent.name: json.loads(p.read_text())["metrics"]["COMBINED"]
+        for p in sorted(split_dir.glob("*/metrics.json"))
+    }
+    if not rows:
+        raise SystemExit(f"no evaluated run in {split_dir}")
+    return evaluate.table(rows, ["HOTA", "DetA", "AssA", "MOTA", "IDF1", "IDSW", "FP", "FN"], first="run")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -78,6 +150,23 @@ def main(argv: list[str] | None = None) -> None:
     p_track.add_argument("--name", help="Output name (default: <tracker>-<detector>).")
     p_track.add_argument("--out", type=Path, default=Path("runs"))
 
+    p_tune = sub.add_parser("tune", help="Grid search on train_half, then run the best point on val_half.")
+    p_tune.add_argument("--tracker", default="sort")
+    p_tune.add_argument("--dataset", choices=DATASETS, default="MOT17")
+    p_tune.add_argument("--detector", help="MOT17 public detections: DPM, FRCNN or SDP (default: all three).")
+    p_tune.add_argument(
+        "--grid", action="append", default=[], help="Values to try, e.g. min_score=0,0.5 or max_age=1,3,5."
+    )
+    p_tune.add_argument("--metric", default="HOTA", choices=["HOTA", "MOTA", "IDF1"])
+    p_tune.add_argument("--jobs", type=int, default=1, help="Grid points run in parallel.")
+    p_tune.add_argument("--name", help="Output name (default: <tracker>-<detector>-tuned).")
+    p_tune.add_argument("--out", type=Path, default=Path("runs"))
+
+    p_sum = sub.add_parser("summary", help="Metrics of every run of a split.")
+    p_sum.add_argument("--dataset", choices=DATASETS, default="MOT17")
+    p_sum.add_argument("--split", choices=SPLITS, default="val_half")
+    p_sum.add_argument("--out", type=Path, default=Path("runs"))
+
     p_cmp = sub.add_parser("compare", help="Check that two folders of results have the same tracks.")
     p_cmp.add_argument("ours", type=Path, help="e.g. runs/MOT17-train/sort-all/data")
     p_cmp.add_argument("reference", type=Path, help="output folder of the reference implementation")
@@ -93,6 +182,10 @@ def main(argv: list[str] | None = None) -> None:
         print(info_table(args.data_dir, args.dataset, args.split))
     elif args.command == "track":
         track(args)
+    elif args.command == "tune":
+        tune(args)
+    elif args.command == "summary":
+        print(summary_table(args.out, args.dataset, args.split))
     elif args.command == "compare":
         from mot_bench import compare
 
