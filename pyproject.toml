@@ -9,6 +9,8 @@ requires-python = ">=3.11,<3.14"
 dependencies = [
     "numpy>=2.0",
     "requests>=2.32",
+    "scipy>=1.14",
+    "trackeval",
 ]
 
 [project.scripts]
@@ -34,3 +36,6 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+
+[tool.uv.sources]
+trackeval = { git = "https://github.com/JonathonLuiten/TrackEval", rev = "12c8791b303e0a0b50f753af204249e622d0281a" }
