@@ -9,13 +9,14 @@ from pathlib import Path
 
 DATASETS = ("MOT17", "MOT20")
 SPLITS = ("train", "test", "train_half", "val_half")
+DETS_HELP = "Detection file: det for the public ones (det/det.txt), or a name given to add-dets."
 
 
-def info_table(data_dir: Path, dataset: str, split: str) -> str:
+def info_table(data_dir: Path, dataset: str, split: str, dets: str = "det") -> str:
     from mot_bench import mot
 
     rows = [("sequence", "frames", "fps", "size", "gt boxes", "det boxes")]
-    for seq in mot.sequences(data_dir, dataset, split):
+    for seq in mot.sequences(data_dir, dataset, split, dets=dets):
         gt = seq.dir / "gt" / "gt.txt"
         n_gt = len(mot.evaluated(mot.read_gt(gt))) if gt.is_file() else "-"
         i = seq.info
@@ -51,10 +52,17 @@ def parse_grid(items: list[str]) -> dict[str, list]:
 def load_sequences(args, split: str) -> list:
     from mot_bench import mot
 
-    seqs = mot.sequences(args.data_dir, args.dataset, split, args.detector)
+    seqs = mot.sequences(args.data_dir, args.dataset, split, args.detector, args.dets)
     if not seqs:
-        raise SystemExit(f"no sequence in {args.data_dir}/{args.dataset}/{split} for detector {args.detector}")
+        raise SystemExit(
+            f"no sequence in {args.data_dir}/{args.dataset}/{split} for detector {args.detector} and dets {args.dets}"
+        )
     return seqs
+
+
+def run_name(args, suffix: str = "") -> str:
+    source = (args.detector or "all") if args.dets == "det" else args.dets
+    return args.name or f"{args.tracker}-{source}{suffix}"
 
 
 def evaluate_run(args, split: str, seqs: list, runs: list, out_dir: Path) -> dict:
@@ -72,7 +80,7 @@ def track(args) -> None:
     from mot_bench import evaluate, run
 
     seqs = load_sequences(args, args.split)
-    name = args.name or f"{args.tracker}-{args.detector or 'all'}"
+    name = run_name(args)
     out_dir = args.out / f"{args.dataset}-{args.split}" / name
     runs = run.run(seqs, args.tracker, parse_params(args.param), out_dir, args.min_score)
     fps = sum(r.frames for r in runs) / sum(r.seconds for r in runs)
@@ -89,7 +97,7 @@ def tune(args) -> None:
     space = parse_grid(args.grid)
     if not space:
         raise SystemExit("nothing to tune, pass at least one --grid key=v1,v2,...")
-    name = args.name or f"{args.tracker}-{args.detector or 'all'}-tuned"
+    name = run_name(args, "-tuned")
     train_dir = args.out / f"{args.dataset}-train_half" / name
     rows = grid_search.search(
         load_sequences(args, "train_half"), args.tracker, space, train_dir, args.dataset, args.jobs
@@ -139,12 +147,19 @@ def main(argv: list[str] | None = None) -> None:
     p_info = sub.add_parser("info", help="List the sequences of a split.")
     p_info.add_argument("--dataset", choices=DATASETS, default="MOT17")
     p_info.add_argument("--split", choices=SPLITS, default="val_half")
+    p_info.add_argument("--dets", default="det", help=DETS_HELP)
+
+    p_add = sub.add_parser("add-dets", help="Add private detections to the training sequences.")
+    p_add.add_argument("src", type=Path, help="folder with one MOTChallenge det file per sequence, <seq>.txt")
+    p_add.add_argument("--name", required=True, help="saved as det/<name>.txt, used with --dets <name>")
+    p_add.add_argument("--dataset", choices=DATASETS, default="MOT17")
 
     p_track = sub.add_parser("track", help="Run a tracker on a split and evaluate it.")
     p_track.add_argument("--tracker", default="sort")
     p_track.add_argument("--dataset", choices=DATASETS, default="MOT17")
     p_track.add_argument("--split", choices=SPLITS, default="val_half")
     p_track.add_argument("--detector", help="MOT17 public detections to use: DPM, FRCNN or SDP (default: all three).")
+    p_track.add_argument("--dets", default="det", help=DETS_HELP)
     p_track.add_argument("--min-score", type=float, help="Drop the detections under this score.")
     p_track.add_argument("--param", action="append", default=[], help="Tracker parameter, e.g. max_age=30.")
     p_track.add_argument("--name", help="Output name (default: <tracker>-<detector>).")
@@ -154,6 +169,7 @@ def main(argv: list[str] | None = None) -> None:
     p_tune.add_argument("--tracker", default="sort")
     p_tune.add_argument("--dataset", choices=DATASETS, default="MOT17")
     p_tune.add_argument("--detector", help="MOT17 public detections: DPM, FRCNN or SDP (default: all three).")
+    p_tune.add_argument("--dets", default="det", help=DETS_HELP)
     p_tune.add_argument(
         "--grid", action="append", default=[], help="Values to try, e.g. min_score=0,0.5 or max_age=1,3,5."
     )
@@ -179,7 +195,12 @@ def main(argv: list[str] | None = None) -> None:
 
         print(data.download(args.data_dir, args.dataset, images=args.images))
     elif args.command == "info":
-        print(info_table(args.data_dir, args.dataset, args.split))
+        print(info_table(args.data_dir, args.dataset, args.split, args.dets))
+    elif args.command == "add-dets":
+        from mot_bench import data
+
+        added = data.add_detections(args.data_dir, args.dataset, args.src, args.name)
+        print(f"det/{args.name}.txt added to {len(added)} sequences: {' '.join(added)}")
     elif args.command == "track":
         track(args)
     elif args.command == "tune":

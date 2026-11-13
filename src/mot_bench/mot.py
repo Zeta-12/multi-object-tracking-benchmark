@@ -101,6 +101,7 @@ class Sequence:
     dir: Path
     info: SeqInfo
     img_dir: Path
+    dets: str = "det"
 
     @property
     def name(self) -> str:
@@ -110,7 +111,8 @@ class Sequence:
         return read_gt(self.dir / "gt" / "gt.txt")
 
     def det(self) -> np.ndarray:
-        return read_det(self.dir / "det" / "det.txt")
+        """det/det.txt is the public detections, other det/<name>.txt files come from `mot add-dets`."""
+        return read_det(self.dir / "det" / f"{self.dets}.txt")
 
     def image(self, frame: int) -> Path:
         """Image of `frame`, counted in this sequence (so frame 1 of val_half is the first val image)."""
@@ -125,8 +127,11 @@ def video_name(name: str) -> str:
     return name
 
 
-def sequences(data_dir: Path, dataset: str, split: str, detector: str | None = None) -> list[Sequence]:
-    """Sequences of <data_dir>/<dataset>/<split>. `detector` keeps one MOT17 copy (DPM, FRCNN or SDP)."""
+def sequences(
+    data_dir: Path, dataset: str, split: str, detector: str | None = None, dets: str = "det"
+) -> list[Sequence]:
+    """Sequences of <data_dir>/<dataset>/<split>. `detector` keeps one MOT17 copy (DPM, FRCNN or SDP), `dets`
+    the sequences that have det/<dets>.txt."""
     split_dir = Path(data_dir) / dataset / split
     if not split_dir.is_dir():
         raise FileNotFoundError(f"{split_dir} not found, run `mot download --dataset {dataset}` first")
@@ -135,6 +140,8 @@ def sequences(data_dir: Path, dataset: str, split: str, detector: str | None = N
     for seq_dir in sorted(p for p in split_dir.iterdir() if (p / "seqinfo.ini").is_file()):
         if detector and not seq_dir.name.endswith(f"-{detector}"):
             continue
+        if not (seq_dir / "det" / f"{dets}.txt").is_file():
+            continue
         info = read_seqinfo(seq_dir / "seqinfo.ini")
-        out.append(Sequence(seq_dir, info, source / video_name(info.name) / info.im_dir))
+        out.append(Sequence(seq_dir, info, source / video_name(info.name) / info.im_dir, dets))
     return out

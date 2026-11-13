@@ -1,6 +1,8 @@
-"""Run the official OC-SORT tracker on MOT17 public detections, to check mot_bench's OC-SORT against it.
+"""Run the official OC-SORT tracker on MOT17 detections, to check mot_bench's OC-SORT against it.
 
-usage: python tools/ocsort_reference.py <OC_SORT clone> <split dir> <out dir>
+usage: python tools/ocsort_reference.py <OC_SORT clone> <split dir> <out dir> [dets]
+
+dets is the detection file, det/<dets>.txt (default det, the public detections).
 
 Needs numpy, scipy, lap and filterpy, not torch. Same inputs as `mot track` (det.txt sorted by frame, one
 update per frame of seqinfo.ini, empty frames included), same settings and output filter as
@@ -14,17 +16,18 @@ from pathlib import Path
 import numpy as np
 
 clone, split_dir, out_dir = (Path(a) for a in sys.argv[1:4])
+dets = sys.argv[4] if len(sys.argv) > 4 else "det"
 sys.path.insert(0, str(clone))
 
 from trackers.ocsort_tracker.ocsort import OCSort  # noqa: E402
 
 out_dir.mkdir(parents=True, exist_ok=True)
-for seq_dir in sorted(p for p in split_dir.iterdir() if (p / "det" / "det.txt").is_file()):
+for seq_dir in sorted(p for p in split_dir.iterdir() if (p / "det" / f"{dets}.txt").is_file()):
     ini = configparser.ConfigParser()
     ini.read(seq_dir / "seqinfo.ini")
     length = int(ini["Sequence"]["seqLength"])
 
-    det = np.loadtxt(seq_dir / "det" / "det.txt", delimiter=",", ndmin=2)[:, :7]
+    det = np.loadtxt(seq_dir / "det" / f"{dets}.txt", delimiter=",", ndmin=2)[:, :7]
     det = det[np.argsort(det[:, 0], kind="stable")]
     boxes = np.concatenate([det[:, 2:4], det[:, 2:4] + det[:, 4:6], det[:, 6:7]], axis=1)
 

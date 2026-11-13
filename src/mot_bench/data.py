@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import shutil
 import time
 import zipfile
 from dataclasses import dataclass
@@ -140,3 +141,19 @@ def download(data_dir: Path, dataset: str, images: bool = False) -> Path:
     halves = split.make_halves(out)
     log.info("%d half sequences written", len(halves))
     return out
+
+
+def add_detections(data_dir: Path, dataset: str, src_dir: Path, name: str) -> list[str]:
+    """Copy <src_dir>/<seq>.txt to det/<name>.txt of each training sequence, then cut the halves again."""
+    if name == "det":
+        raise ValueError("det is the name of the public detections")
+    train = Path(data_dir) / dataset / "train"
+    added = []
+    for src in sorted(Path(src_dir).glob("*.txt")):
+        seq_dir = train / src.stem
+        if not (seq_dir / "seqinfo.ini").is_file():
+            raise FileNotFoundError(f"no sequence {src.stem} in {train}")
+        shutil.copyfile(src, seq_dir / "det" / f"{name}.txt")
+        added.append(src.stem)
+    split.make_halves(Path(data_dir) / dataset)
+    return added

@@ -151,6 +151,35 @@ uv run mot compare runs/MOT17-train/ocsort-all/data <out>
 I wrote the trackers with the help of an AI assistant. Each one is checked against its reference implementation,
 as above, before its results are reported here.
 
+## YOLOX detections
+
+The ByteTrack and OC-SORT papers report their MOT17 `val_half` numbers on the boxes of a YOLOX-X trained by the
+ByteTrack authors on CrowdHuman and on `train_half` (`bytetrack_ablation.pth.tar`, from the ByteTrack README).
+`tools/yolox_detections.py` runs it on the MOT17 frames with the settings of ByteTrack's `tools/track.py`: input
+800 x 1440, fp16, confidence 0.01, NMS 0.7, each box with the score objectness x class. It needs a CUDA GPU and
+the dependencies of the ByteTrack code. It ran at 9 fps on an RTX 3060 Ti, 10 minutes for the 7 videos.
+`mot add-dets` copies the files into the dataset as `det/<name>.txt`, cuts the halves again, and `--dets`
+picks them:
+
+```
+# in a venv with torch and the ByteTrack requirements, after mot download --images
+python tools/yolox_detections.py <ByteTrack clone> bytetrack_ablation.pth.tar data/MOT17/train <out>
+# here
+uv run mot add-dets <out> --name yolox_ablation
+uv run mot track --tracker bytetrack --dets yolox_ablation
+```
+
+The trackers still match the reference code on these boxes. OC-SORT gives the same 43,292 boxes on `val_half`
+(94,543 on the full videos). ByteTrack gives the same 48,163 boxes but one, which has a height of 317.92 here and
+317.93 in the reference, on the same track: the two Kalman filters do the same computation with different numpy
+calls, and the last bits can tip a rounding to 0.01 px. The reference tools take the name of the detection file
+as a 4th argument:
+
+```
+python tools/bytetrack_reference.py <ByteTrack clone> data/MOT17/val_half <out> yolox_ablation
+uv run mot compare runs/MOT17-val_half/bytetrack-yolox_ablation/data <out>
+```
+
 ## Results
 
 MOT17 `val_half`, public detections. "reference" is the setting of the reference code, "tuned" the best HOTA of
@@ -192,26 +221,27 @@ Tuned settings:
    it 30 frames. ByteTrack still switches ids less often (178 vs 371 for SORT with FRCNN).
 2. **ByteTrack's second association needs low score boxes.** Turning it off (`low_thresh=0.6`) costs 0.2 HOTA
    with FRCNN and SDP, and 2.0 with DPM. Only 4.4% of the FRCNN detections and 2.8% of the SDP ones are between
-   0.1 and 0.6, against 16.6% for DPM. 70% of the FRCNN scores are exactly 1.0 and SDP has none under 0.4. The
-   ByteTrack paper gets its gains on YOLOX boxes kept down to a score of 0.1, which come next here.
+   0.1 and 0.6, against 16.6% for DPM. 70% of the FRCNN scores are exactly 1.0 and SDP has none under 0.4. On
+   the YOLOX boxes, kept down to a score of 0.01, it's worth 1.2 HOTA (see below).
 3. **ORU, OCM and OCR don't help on these detections.** Turned off one at a time, each moves HOTA by at most 0.4
-   with FRCNN and SDP, in both directions (table below). Pedestrians in MOT17 mostly walk in straight lines,
-   and the OC-SORT paper shows its gains on YOLOX detections and on dance videos with more erratic motion.
+   with FRCNN and SDP, in both directions (table below). Pedestrians in MOT17 mostly walk in straight lines.
+   The YOLOX boxes don't change this.
 4. **Reporting the detection instead of the Kalman box costs OC-SORT 1.7 HOTA with SDP** (53.6 vs 55.3, LocA
    85.9 vs 87.7). The SDP boxes are the noisiest and the filter smooths them. With FRCNN the detection is a bit
    better (49.8 vs 49.6).
 5. The tops of the grids are flat: on `train_half` the five best points are within 0.3 HOTA, so the pick
    between them is mostly noise. Tuning ByteTrack with SDP gives nothing on `val_half` (56.3 vs 56.4).
 
-OC-SORT at the reference settings with one part changed, HOTA on MOT17 `val_half`:
+OC-SORT at the reference settings with parts changed, HOTA on MOT17 `val_half`:
 
-| | DPM | FRCNN | SDP |
-|---|---|---|---|
-| OC-SORT | 25.3 | 49.8 | 53.6 |
-| without ORU (`oru=false`) | 25.3 | 49.6 | 53.6 |
-| without OCM (`inertia=0`) | 26.0 | 49.7 | 53.4 |
-| without OCR (`ocr=false`) | 25.1 | 50.2 | 53.8 |
-| Kalman box reported (`kalman_box=true`) | 25.8 | 49.6 | 55.3 |
+| | DPM | FRCNN | SDP | YOLOX |
+|---|---|---|---|---|
+| OC-SORT | 25.3 | 49.8 | 53.6 | 66.4 |
+| without ORU (`oru=false`) | 25.3 | 49.6 | 53.6 | 66.4 |
+| without OCM (`inertia=0`) | 26.0 | 49.7 | 53.4 | 66.3 |
+| without OCR (`ocr=false`) | 25.1 | 50.2 | 53.8 | 66.4 |
+| without the three | 26.0 | 50.0 | 53.9 | 66.4 |
+| Kalman box reported (`kalman_box=true`) | 25.8 | 49.6 | 55.3 | 66.4 |
 
 The DPM scores aren't calibrated (-0.5 to 4.8). SORT keeps all of them at the reference settings, negative ones
 included. The thresholds of ByteTrack and OC-SORT are made for scores between 0 and 1: at 0.6, OC-SORT keeps only
@@ -227,8 +257,49 @@ MOT20 `val_half`, public detections:
 
 In the crowds of MOT20 people are hidden all the time, and keeping the lost tracks gives 11 points of HOTA. The
 MOT20 detection scores are rounded to 0 or 1 (99% are 0 in MOT20-05), so there is no score threshold to tune, and
-ByteTrack and OC-SORT, which split or filter the detections by score, can't use them. They will run on the YOLOX
-detections.
+ByteTrack and OC-SORT, which split or filter the detections by score, can't use them. The YOLOX model of
+ByteTrack for MOT20 was trained on all the MOT20 training videos, so it can't be scored on `val_half`.
+
+MOT17 `val_half`, YOLOX detections of the ByteTrack ablation model, against the published numbers:
+
+| Tracker | Metrics | Here | Published |
+|---|---|---|---|
+| ByteTrack | MOTA / IDF1 / ID switches (motmetrics) | 76.4 / 79.1 / 171 | 76.6 / 79.3 / 159 (ByteTrack README) |
+| OC-SORT | HOTA / AssA / IDF1 / MOTA (TrackEval) | 66.4 / 69.1 / 78.1 / 74.5 | 66.5 / 68.9 / 77.7 / 74.9 (OC-SORT model zoo) |
+
+ByteTrack computes its numbers with motmetrics in `tools/track.py`, and `tools/motmetrics_eval.py` does the same.
+TrackEval gives a MOTA of 77.8 to the same files, as it first drops the tracker boxes matched to distractors and
+static people. The reference trackers give the same output as here on these boxes, so the gaps come from the
+detections, computed on other hardware and library versions than the authors'. Running the detector in fp32
+instead of fp16, on the same GPU (`fp32` as 5th argument of `tools/yolox_detections.py`), moves the numbers by as
+much: ByteTrack gets 76.6 / 79.2 / 167 and OC-SORT 66.2 / 68.7 / 77.7 / 74.5.
+
+The same detections for every tracker, TrackEval:
+
+| Tracker | Settings | HOTA | DetA | AssA | MOTA | IDF1 | ID switches |
+|---|---|---|---|---|---|---|---|
+| SORT | reference, min_score=0.6 | 62.9 | 64.3 | 62.0 | 74.3 | 70.8 | 365 |
+| SORT | min_score=0.6, max_age=30 | 66.4 | 64.2 | 69.0 | 74.7 | 77.7 | 232 |
+| ByteTrack | reference | 67.7 | 66.6 | 69.4 | 77.8 | 79.7 | 176 |
+| ByteTrack | without the second association (`low_thresh=0.6`) | 66.5 | 65.7 | 67.8 | 76.8 | 77.5 | 200 |
+| OC-SORT | reference | 66.4 | 64.2 | 69.1 | 74.5 | 78.1 | 211 |
+| OC-SORT | `use_byte=true` | 66.7 | 65.5 | 68.5 | 75.2 | 77.8 | 266 |
+
+SORT has no score threshold of its own, so it gets the boxes from 0.6, the high threshold of the two others.
+Nothing is tuned on these detections: the detector was trained on `train_half`, and its boxes there are better
+than on new frames.
+
+6. **ByteTrack is first on these boxes, and its second association is worth 1.2 HOTA** (67.7 vs 66.5, IDF1 79.7
+   vs 77.5). 16.4% of the boxes are between 0.1 and 0.6, against 4.4% of the FRCNN ones. Without it, ByteTrack
+   is level with OC-SORT.
+7. **ORU, OCM and OCR together give nothing on MOT17, even on these boxes.** OC-SORT without the three scores 66.4,
+   like the full tracker, and so does a SORT that keeps lost tracks 30 frames. The fp32 detections move OC-SORT
+   by 0.2, so the differences of 0.1 in the ablation table are noise. In Table 5 of the OC-SORT paper the same
+   three parts take HOTA from 64.9 to 66.5 on this split. The full tracker matches the 66.5, but the paper
+   doesn't describe its baseline in enough detail to run it again. Its large gain is on DanceTrack (47.8 to
+   52.1), which isn't covered here.
+8. As with the public detections, most of SORT's gap comes from the lost tracks: keeping them 30 frames instead
+   of 1 gives 3.5 HOTA and takes the ID switches from 365 to 232.
 
 ## Layout
 
@@ -249,12 +320,17 @@ src/mot_bench/
 tools/
   bytetrack_reference.py   runs the official ByteTrack tracker on the same detections
   ocsort_reference.py      same for OC-SORT
+  yolox_detections.py      YOLOX boxes of the ByteTrack ablation model, on a GPU
+  motmetrics_eval.py       MOTA / IDF1 / ID switches computed as in ByteTrack
 ```
 
 ## Data and licences
 
 - [MOT17](https://motchallenge.net/data/MOT17/) and [MOT20](https://motchallenge.net/data/MOT20/): CC BY-NC-SA 3.0.
   Nothing from the datasets is stored in this repository.
+- YOLOX model: `bytetrack_ablation.pth.tar` from [ifzhang/ByteTrack](https://github.com/ifzhang/ByteTrack) (MIT),
+  trained on MOT17 and [CrowdHuman](https://www.crowdhuman.org/), which is for non-commercial research only.
+  Neither the weights nor the detections are stored here.
 - Code: Apache-2.0.
 
 ## Author

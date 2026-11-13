@@ -40,7 +40,7 @@ def _cut_file(src: Path, dst: Path, first: int, last: int) -> int:
 
 
 def make_halves(dataset_dir: Path) -> list[Path]:
-    """Write <dataset_dir>/{train_half,val_half}/<seq>/ (seqinfo, gt, det) from <dataset_dir>/train."""
+    """Write <dataset_dir>/{train_half,val_half}/<seq>/ (seqinfo, gt, every det file) from <dataset_dir>/train."""
     written = []
     for seq_dir in sorted(p for p in (Path(dataset_dir) / "train").iterdir() if (p / "seqinfo.ini").is_file()):
         info = read_seqinfo(seq_dir / "seqinfo.ini")
@@ -48,8 +48,9 @@ def make_halves(dataset_dir: Path) -> list[Path]:
             out = Path(dataset_dir) / split / info.name
             half = replace(info, length=last - first + 1, frame_offset=first - 1)
             write_seqinfo(half, out / "seqinfo.ini")
-            for sub in ("gt/gt.txt", "det/det.txt"):
-                if (seq_dir / sub).is_file():
-                    _cut_file(seq_dir / sub, out / sub, first, last)
+            files = [seq_dir / "gt" / "gt.txt", *sorted((seq_dir / "det").glob("*.txt"))]
+            for src in files:
+                if src.is_file():
+                    _cut_file(src, out / src.relative_to(seq_dir), first, last)
             written.append(out)
     return written

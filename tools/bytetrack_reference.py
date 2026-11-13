@@ -1,6 +1,8 @@
-"""Run the official BYTETracker on MOT17 public detections, to check mot_bench's ByteTrack against it.
+"""Run the official BYTETracker on MOT17 detections, to check mot_bench's ByteTrack against it.
 
-usage: python tools/bytetrack_reference.py <ByteTrack clone> <split dir> <out dir>
+usage: python tools/bytetrack_reference.py <ByteTrack clone> <split dir> <out dir> [dets]
+
+dets is the detection file, det/<dets>.txt (default det, the public detections).
 
 Needs numpy, scipy and lap, not torch: the tracker gets (n, 5) boxes and scores, no detector runs. Same
 inputs as `mot track` (det.txt sorted by frame, one update per frame of seqinfo.ini, empty frames
@@ -16,6 +18,7 @@ from types import SimpleNamespace
 import numpy as np
 
 clone, split_dir, out_dir = (Path(a) for a in sys.argv[1:4])
+dets = sys.argv[4] if len(sys.argv) > 4 else "det"
 
 # the code still uses np.float, removed in numpy 1.24
 np.float = float
@@ -60,12 +63,12 @@ def track_buffer(name: str) -> int:
 
 
 out_dir.mkdir(parents=True, exist_ok=True)
-for seq_dir in sorted(p for p in split_dir.iterdir() if (p / "det" / "det.txt").is_file()):
+for seq_dir in sorted(p for p in split_dir.iterdir() if (p / "det" / f"{dets}.txt").is_file()):
     ini = configparser.ConfigParser()
     ini.read(seq_dir / "seqinfo.ini")
     length = int(ini["Sequence"]["seqLength"])
 
-    det = np.loadtxt(seq_dir / "det" / "det.txt", delimiter=",", ndmin=2)[:, :7]
+    det = np.loadtxt(seq_dir / "det" / f"{dets}.txt", delimiter=",", ndmin=2)[:, :7]
     det = det[np.argsort(det[:, 0], kind="stable")]
     boxes = np.concatenate([det[:, 2:4], det[:, 2:4] + det[:, 4:6], det[:, 6:7]], axis=1)
 

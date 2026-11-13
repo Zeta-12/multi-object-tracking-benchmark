@@ -97,3 +97,30 @@ def test_download_builds_the_halves(tmp_path, monkeypatch):
     out = data.download(tmp_path / "data", "MOT20")
     assert (out / "val_half" / "MOT20-01" / "gt" / "gt.txt").read_text().splitlines()[0] == "1,1,0,0,10,10,1,1,1"
     assert len((out / "val_half" / "MOT20-01" / "det" / "det.txt").read_text().splitlines()) == 4
+
+
+def test_add_detections_and_cut_them(mot17, tmp_path):
+    from mot_bench import mot
+
+    src = tmp_path / "yolox"
+    src.mkdir()
+    # frames 1 to 11, full precision values
+    (src / "MOT17-02-FRCNN.txt").write_text(
+        "".join(f"{f},-1,10.25,20.125,40.000000001,90.5,0.0123456789,-1,-1,-1\n" for f in range(1, 12))
+    )
+    assert data.add_detections(mot17.parent, "MOT17", src, "yolox") == ["MOT17-02-FRCNN"]
+
+    seqs = mot.sequences(mot17.parent, "MOT17", "val_half", dets="yolox")
+    assert [s.name for s in seqs] == ["MOT17-02-FRCNN"]
+    det = seqs[0].det()
+    # 11 frames: val_half is frames 7 to 11, renumbered from 1, nothing rounded
+    assert det[:, 0].tolist() == [1, 2, 3, 4, 5]
+    assert det[0, 4] == 40.000000001 and det[0, 6] == 0.0123456789
+    # the public detections are still there
+    assert len(mot.sequences(mot17.parent, "MOT17", "val_half")) == 3
+
+    with pytest.raises(ValueError):
+        data.add_detections(mot17.parent, "MOT17", src, "det")
+    (src / "MOT17-99-FRCNN.txt").write_text("")
+    with pytest.raises(FileNotFoundError):
+        data.add_detections(mot17.parent, "MOT17", src, "yolox")
