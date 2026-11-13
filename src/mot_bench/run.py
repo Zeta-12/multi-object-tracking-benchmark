@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import time
@@ -39,12 +40,30 @@ def detections_by_frame(det: np.ndarray, length: int, min_score: float | None = 
 
 
 def track_sequence(tracker, seq: mot.Sequence, min_score: float | None = None) -> tuple[np.ndarray, SeqRun]:
-    """Result rows (frame, id, x, y, w, h, score) and the timing of the tracker alone."""
-    frames = detections_by_frame(seq.det(), seq.info.length, min_score)
+    """Result rows (frame, id, x, y, w, h, score) and the timing of the tracker alone.
+
+    A tracker whose update takes `features` gets the re-ID features of the detections of the frame (None
+    without det/<dets>.npy), one that takes `warp` gets the camera motion of the frame (None without --cmc).
+    """
+    det = seq.det()
+    takes = inspect.signature(tracker.update).parameters
+    feats = seq.features() if "features" in takes else None
+    warps = seq.warps() if "warp" in takes else None
+    if min_score is not None:
+        keep = det[:, 6] >= min_score
+        det = det[keep]
+        feats = None if feats is None else feats[keep]
+    frames = detections_by_frame(det, seq.info.length)
+    bounds = np.searchsorted(det[:, 0], np.arange(1, seq.info.length + 2))
     rows = []
     start = time.perf_counter()
     for f, dets in enumerate(frames, start=1):
-        out = tracker.update(dets)
+        extra = {}
+        if "features" in takes:
+            extra["features"] = None if feats is None else feats[bounds[f - 1] : bounds[f]]
+        if "warp" in takes:
+            extra["warp"] = None if warps is None else warps[f - 1]
+        out = tracker.update(dets, **extra)
         if len(out):
             rows.append(np.column_stack([np.full(len(out), f), out[:, 4], tlbr_to_tlwh(out[:, :4]), out[:, 5]]))
     seconds = time.perf_counter() - start

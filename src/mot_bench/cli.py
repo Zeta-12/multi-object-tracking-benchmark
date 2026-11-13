@@ -10,6 +10,7 @@ from pathlib import Path
 DATASETS = ("MOT17", "MOT20")
 SPLITS = ("train", "test", "train_half", "val_half")
 DETS_HELP = "Detection file: det for the public ones (det/det.txt), or a name given to add-dets."
+CMC_HELP = "Camera motion file, a name given to add-cmc (for BoT-SORT)."
 
 
 def info_table(data_dir: Path, dataset: str, split: str, dets: str = "det") -> str:
@@ -52,10 +53,11 @@ def parse_grid(items: list[str]) -> dict[str, list]:
 def load_sequences(args, split: str) -> list:
     from mot_bench import mot
 
-    seqs = mot.sequences(args.data_dir, args.dataset, split, args.detector, args.dets)
+    seqs = mot.sequences(args.data_dir, args.dataset, split, args.detector, args.dets, args.cmc)
     if not seqs:
         raise SystemExit(
-            f"no sequence in {args.data_dir}/{args.dataset}/{split} for detector {args.detector} and dets {args.dets}"
+            f"no sequence in {args.data_dir}/{args.dataset}/{split} for detector {args.detector}, dets {args.dets}"
+            f" and cmc {args.cmc}"
         )
     return seqs
 
@@ -154,12 +156,23 @@ def main(argv: list[str] | None = None) -> None:
     p_add.add_argument("--name", required=True, help="saved as det/<name>.txt, used with --dets <name>")
     p_add.add_argument("--dataset", choices=DATASETS, default="MOT17")
 
+    p_feat = sub.add_parser("add-features", help="Add the re-ID features of a detection file.")
+    p_feat.add_argument("src", type=Path, help="folder with <seq>.npy, one feature per line of det/<dets>.txt")
+    p_feat.add_argument("--dets", required=True, help="the detection file they belong to, saved as det/<dets>.npy")
+    p_feat.add_argument("--dataset", choices=DATASETS, default="MOT17")
+
+    p_cmc = sub.add_parser("add-cmc", help="Add camera motion files to the training sequences.")
+    p_cmc.add_argument("src", type=Path, help="BoT-SORT tracker/GMC_files/MOTChallenge folder (GMC-<video>.txt)")
+    p_cmc.add_argument("--name", required=True, help="saved as cmc/<name>.txt, used with --cmc <name>")
+    p_cmc.add_argument("--dataset", choices=DATASETS, default="MOT17")
+
     p_track = sub.add_parser("track", help="Run a tracker on a split and evaluate it.")
     p_track.add_argument("--tracker", default="sort")
     p_track.add_argument("--dataset", choices=DATASETS, default="MOT17")
     p_track.add_argument("--split", choices=SPLITS, default="val_half")
     p_track.add_argument("--detector", help="MOT17 public detections to use: DPM, FRCNN or SDP (default: all three).")
     p_track.add_argument("--dets", default="det", help=DETS_HELP)
+    p_track.add_argument("--cmc", help=CMC_HELP)
     p_track.add_argument("--min-score", type=float, help="Drop the detections under this score.")
     p_track.add_argument("--param", action="append", default=[], help="Tracker parameter, e.g. max_age=30.")
     p_track.add_argument("--name", help="Output name (default: <tracker>-<detector>).")
@@ -170,6 +183,7 @@ def main(argv: list[str] | None = None) -> None:
     p_tune.add_argument("--dataset", choices=DATASETS, default="MOT17")
     p_tune.add_argument("--detector", help="MOT17 public detections: DPM, FRCNN or SDP (default: all three).")
     p_tune.add_argument("--dets", default="det", help=DETS_HELP)
+    p_tune.add_argument("--cmc", help=CMC_HELP)
     p_tune.add_argument(
         "--grid", action="append", default=[], help="Values to try, e.g. min_score=0,0.5 or max_age=1,3,5."
     )
@@ -201,6 +215,16 @@ def main(argv: list[str] | None = None) -> None:
 
         added = data.add_detections(args.data_dir, args.dataset, args.src, args.name)
         print(f"det/{args.name}.txt added to {len(added)} sequences: {' '.join(added)}")
+    elif args.command == "add-features":
+        from mot_bench import data
+
+        added = data.add_features(args.data_dir, args.dataset, args.src, args.dets)
+        print(f"det/{args.dets}.npy added to {len(added)} sequences: {' '.join(added)}")
+    elif args.command == "add-cmc":
+        from mot_bench import data
+
+        added = data.add_cmc(args.data_dir, args.dataset, args.src, args.name)
+        print(f"cmc/{args.name}.txt added to {len(added)} sequences")
     elif args.command == "track":
         track(args)
     elif args.command == "tune":

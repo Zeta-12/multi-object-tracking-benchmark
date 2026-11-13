@@ -124,3 +124,55 @@ def test_add_detections_and_cut_them(mot17, tmp_path):
     (src / "MOT17-99-FRCNN.txt").write_text("")
     with pytest.raises(FileNotFoundError):
         data.add_detections(mot17.parent, "MOT17", src, "yolox")
+
+
+def test_add_features_follow_their_detections(mot17, tmp_path):
+    import numpy as np
+
+    from mot_bench import mot
+
+    seq = mot17 / "train" / "MOT17-02-FRCNN"
+    # det.txt of the fixture isn't sorted by frame: one feature per line, in the order of the file
+    frames = np.loadtxt(seq / "det" / "det.txt", delimiter=",", usecols=0)
+    src = tmp_path / "reid"
+    src.mkdir()
+    np.save(src / "MOT17-02-FRCNN.npy", np.column_stack([frames, np.arange(len(frames))]).astype(np.float16))
+    assert data.add_features(mot17.parent, "MOT17", src, "det") == ["MOT17-02-FRCNN"]
+
+    for split in ("train", "val_half", "train_half"):
+        s = mot.sequences(mot17.parent, "MOT17", split, detector="FRCNN")[0]
+        det, feats = s.det(), s.features()
+        # each row still carries the frame of its detection, renumbered with the half
+        offset = s.info.frame_offset
+        np.testing.assert_array_equal(feats[:, 0] - offset, det[:, 0])
+    assert mot.sequences(mot17.parent, "MOT17", "val_half", detector="SDP")[0].features() is None
+
+    np.save(src / "MOT17-02-FRCNN.npy", np.zeros((3, 2), np.float16))
+    with pytest.raises(ValueError):
+        data.add_features(mot17.parent, "MOT17", src, "det")
+
+
+def test_add_cmc_from_botsort_files(mot17, tmp_path):
+    import numpy as np
+
+    from mot_bench import mot
+
+    src = tmp_path / "GMC_files"
+    src.mkdir()
+    # index from 0, tab separated, a trailing tab, as in BoT-SORT
+    lines = [f"{i}\t1.000001\t0.000000\t{i}.5\t0.000000\t1.000001\t-{i}\t\n" for i in range(11)]
+    (src / "GMC-MOT17-02.txt").write_text("".join(lines))
+    added = data.add_cmc(mot17.parent, "MOT17", src, "botsort")
+    assert added == ["MOT17-02-FRCNN", "MOT17-02-SDP"]
+
+    first = (mot17 / "train" / "MOT17-02-SDP" / "cmc" / "botsort.txt").read_text().splitlines()[0]
+    assert first == "1,1.000001,0.000000,0.5,0.000000,1.000001,-0"
+    seqs = mot.sequences(mot17.parent, "MOT17", "val_half", cmc="botsort")
+    assert [s.name for s in seqs] == ["MOT17-02-FRCNN", "MOT17-02-SDP"]
+    warps = seqs[0].warps()
+    # 11 frames: val_half starts at frame 7, index 6 of the file
+    assert warps.shape == (5, 2, 3)
+    np.testing.assert_array_equal(warps[0], [[1.000001, 0.0, 6.5], [0.0, 1.000001, -6.0]])
+    # no cmc asked: None, a video without a file: no motion
+    assert mot.sequences(mot17.parent, "MOT17", "val_half")[0].warps() is None
+    np.testing.assert_array_equal(mot.read_cmc(seqs[0].dir / "cmc" / "botsort.txt", 7)[6], np.eye(2, 3))

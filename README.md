@@ -7,7 +7,7 @@ NumPy, and compared on MOT17 and MOT20 with [TrackEval](https://github.com/Jonat
 IDF1). All trackers get the same detections, so the differences come from the association step only, and each
 implementation has to match the numbers published by its authors on the same split.
 
-Work in progress: the data, the evaluation, SORT, ByteTrack and OC-SORT are in place. DeepSORT and BoT-SORT come
+Work in progress: the data, the evaluation, SORT, ByteTrack, OC-SORT and BoT-SORT are in place. DeepSORT comes
 next.
 
 ## Setup
@@ -148,6 +148,28 @@ uv run mot track --tracker ocsort --split train --name ocsort-all
 uv run mot compare runs/MOT17-train/ocsort-all/data <out>
 ```
 
+BoT-SORT (Aharon et al., 2022) is ByteTrack with three changes:
+
+- the Kalman state has the width and the height instead of the w/h ratio and the height (`kalman.XywhBox`);
+- after the prediction the tracks are moved by the camera motion between the two frames (CMC), an affine map
+  given with each frame;
+- with re-ID features, the first association costs the smaller of the IoU cost of ByteTrack and half the cosine
+  distance between the appearance of the track and the detection. The appearance only counts under 0.25 and when
+  1 - IoU is under 0.5. The appearance of a track is a moving average of the features of its high score
+  detections (0.9 old, 0.1 new).
+
+Details of the reference code kept here:
+
+- the first association matches up to a cost of 0.8 (0.9 in ByteTrack);
+- a lost track drops its width and height velocities;
+- the tracks born on the previous frame aren't predicted, but they're moved by the camera motion;
+- every track of the tracked list is reported, also a track on the frame it's born;
+- the output skips boxes under 10 px2 or more than 1.6 times wider than tall.
+
+The appearance can lower the cost of a pair, never raise it. And a high score pair that passes the overlap test
+already has an IoU cost of at most 1 - 0.5 x 0.6 = 0.7, under the 0.8 limit: the re-ID never adds a match the IoU
+would refuse, it only changes which of the overlapping detections a track takes.
+
 I wrote the trackers with the help of an AI assistant. Each one is checked against its reference implementation,
 as above, before its results are reported here.
 
@@ -178,6 +200,41 @@ as a 4th argument:
 ```
 python tools/bytetrack_reference.py <ByteTrack clone> data/MOT17/val_half <out> yolox_ablation
 uv run mot compare runs/MOT17-val_half/bytetrack-yolox_ablation/data <out>
+```
+
+## Re-ID features and camera motion
+
+BoT-SORT needs two more inputs. The re-ID features come from the FastReID SBS-S50 that the BoT-SORT authors
+trained on the first half of each MOT17 training video (`mot17_sbs_S50.pth`, from the BoT-SORT README).
+`tools/reid_features.py` computes them on a GPU for every YOLOX box over 0.1, with the steps of the BoT-SORT
+encoder: integer box clipped to the image, crop resized to 128 x 384, fp16, batches of 8, L2 norm. The boxes
+over 0.6 come first, in the batches of a BoT-SORT run, and their features are the same as the ones of the BoT-SORT
+encoder (checked on 884 boxes of MOT17-09, no difference). The 131,100 boxes took 6 minutes on the RTX 3060 Ti.
+They're saved as `det/<name>.npy`, one row per line of `det/<name>.txt`, and cut into halves with it.
+
+The camera motion is the one BoT-SORT ships and reads by default (`--cmc-method file` in its `tools/track.py`):
+`tracker/GMC_files/MOTChallenge`, one affine map per frame of each video. Its `MOT17_ablation` files are the
+`val_half` lines of these, so the full files cut like the rest give the same input. `mot add-cmc` copies them to
+`cmc/<name>.txt` and `--cmc` picks them:
+
+```
+# in a venv with torch, opencv, yacs, termcolor and pyyaml
+python tools/reid_features.py <BoT-SORT clone> mot17_sbs_S50.pth data/MOT17/train yolox_ablation <out>
+# here
+uv run mot add-features <out> --dets yolox_ablation
+uv run mot add-cmc <BoT-SORT clone>/tracker/GMC_files/MOTChallenge --name botsort
+uv run mot track --tracker botsort --dets yolox_ablation --cmc botsort
+```
+
+With these, BoT-SORT gives the same output as the reference
+([NirAharon/BoT-SORT](https://github.com/NirAharon/BoT-SORT) at 2519854): the same 48,656 boxes and the same
+tracks on `val_half`, 104,759 on the full videos, and 48,694 and 104,863 without re-ID (`reid=false`).
+`tools/botsort_reference.py` runs the reference tracker with a lookup in these features in place of the re-ID
+model, and its own reader of the camera motion files:
+
+```
+python tools/botsort_reference.py <BoT-SORT clone> data/MOT17/val_half <out> yolox_ablation
+uv run mot compare runs/MOT17-val_half/botsort-yolox_ablation/data <out>
 ```
 
 ## Results
@@ -284,14 +341,33 @@ The same detections for every tracker, TrackEval:
 | ByteTrack | without the second association (`low_thresh=0.6`) | 66.5 | 65.7 | 67.8 | 76.8 | 77.5 | 200 |
 | OC-SORT | reference | 66.4 | 64.2 | 69.1 | 74.5 | 78.1 | 211 |
 | OC-SORT | `use_byte=true` | 66.7 | 65.5 | 68.5 | 75.2 | 77.8 | 266 |
+| BoT-SORT | reference, with re-ID | 68.8 | 67.3 | 71.0 | 78.4 | 81.6 | 158 |
+| BoT-SORT | without re-ID (`reid=false`) | 69.1 | 67.2 | 71.6 | 78.4 | 81.6 | 142 |
+| BoT-SORT | without CMC (`cmc=false`) | 67.7 | 67.0 | 68.9 | 77.9 | 79.1 | 304 |
+| BoT-SORT | without CMC and re-ID | 68.0 | 66.9 | 69.7 | 77.8 | 79.5 | 341 |
 
-SORT has no score threshold of its own, so it gets the boxes from 0.6, the high threshold of the two others.
-Nothing is tuned on these detections: the detector was trained on `train_half`, and its boxes there are better
-than on new frames.
+SORT has no score threshold of its own, so it gets the boxes from 0.6, the high threshold of the others. Nothing
+is tuned on these detections: the detector was trained on `train_half`, and its boxes there are better than on
+new frames. The same goes for the re-ID model, trained on the first half of the same videos: it has seen the
+people of `val_half`, on other frames.
 
-6. **ByteTrack is first on these boxes, and its second association is worth 1.2 HOTA** (67.7 vs 66.5, IDF1 79.7
-   vs 77.5). 16.4% of the boxes are between 0.1 and 0.6, against 4.4% of the FRCNN ones. Without it, ByteTrack
-   is level with OC-SORT.
+BoT-SORT against Table 1 of its paper (HOTA / MOTA / IDF1, TrackEval):
+
+| Paper row | Paper | Here | Run here |
+|---|---|---|---|
+| ByteTrack, matching up to 0.8 | 67.88 / 77.66 / 79.77 | 67.7 / 77.5 / 79.4 | `bytetrack`, `match_thresh=0.8` |
+| + Kalman state with the width | 68.12 / 77.67 / 79.89 | 68.0 / 77.8 / 79.5 | `botsort`, `cmc=false`, `reid=false` |
+| BoT-SORT | 69.11 / 78.39 / 81.53 | 69.1 / 78.4 / 81.6 | `botsort`, `reid=false` |
+| BoT-SORT-ReID | 69.17 / 78.46 / 82.07 | 68.8 / 78.4 / 81.6 | `botsort` |
+
+The second row of the paper only changes the Kalman state. The run here is BoT-SORT without CMC and re-ID, which
+also has the other details of its code (output of the new tracks, 10 px2 filter). With the fp32 detections,
+BoT-SORT without re-ID gets 69.3 / 78.5 / 82.2: the gap to the paper with re-ID (0.4 HOTA, 0.5 IDF1) is within
+what the detector numerics move.
+
+6. **ByteTrack's second association is worth 1.2 HOTA on these boxes** (67.7 vs 66.5, IDF1 79.7 vs 77.5). 16.4%
+   of the boxes are between 0.1 and 0.6, against 4.4% of the FRCNN ones. Without it, ByteTrack is level with
+   OC-SORT.
 7. **ORU, OCM and OCR together give nothing on MOT17, even on these boxes.** OC-SORT without the three scores 66.4,
    like the full tracker, and so does a SORT that keeps lost tracks 30 frames. The fp32 detections move OC-SORT
    by 0.2, so the differences of 0.1 in the ablation table are noise. In Table 5 of the OC-SORT paper the same
@@ -300,18 +376,35 @@ than on new frames.
    52.1), which isn't covered here.
 8. As with the public detections, most of SORT's gap comes from the lost tracks: keeping them 30 frames instead
    of 1 gives 3.5 HOTA and takes the ID switches from 365 to 232.
+9. **The camera motion compensation is what makes BoT-SORT first, and only on the videos where the camera
+   moves.** In the GMC files the camera of MOT17-05, -10, -11 and -13 moves 3 to 12 px per frame (median), the
+   one of MOT17-02, -04 and -09 under 0.2 px. On the first four, CMC adds 1.3 to 6.6 HOTA (without re-ID), and
+   the ID switches of MOT17-13 go from 147 to 3. On the static three nothing changes. Over the split it's +1.1
+   HOTA and +2.1 IDF1, because the static MOT17-04 holds 45% of the ground truth boxes.
+10. **The re-ID gives nothing measurable here**: 68.8 HOTA with it, 69.1 without (69.17 and 69.11 in the paper).
+    By video it helps on MOT17-02, -10 and -11 (up to +2.6 HOTA) and costs on MOT17-04 and -09 (-1.5 and -3.8).
+    As shown above, it can only change which overlapping detection a track takes.
+
+HOTA by video, BoT-SORT on the YOLOX boxes:
+
+| | 02 | 04 | 05 | 09 | 10 | 11 | 13 |
+|---|---|---|---|---|---|---|---|
+| camera shift, px per frame (median) | 0.16 | 0.06 | 4.63 | 0.07 | 2.95 | 4.34 | 11.59 |
+| without CMC and re-ID | 47.8 | 79.4 | 63.6 | 68.1 | 52.0 | 66.2 | 63.8 |
+| with CMC | 47.7 | 79.4 | 64.9 | 68.1 | 56.8 | 67.9 | 70.4 |
+| with CMC and re-ID | 49.7 | 77.9 | 65.2 | 64.3 | 59.4 | 69.5 | 70.2 |
 
 ## Layout
 
 ```
 src/mot_bench/
-  data.py         MOTChallenge download (resume, SHA-256) and extraction
-  mot.py          sequences, seqinfo.ini, gt / det / result files
+  data.py         MOTChallenge download (resume, SHA-256) and extraction, added detections, features, CMC
+  mot.py          sequences, seqinfo.ini, gt / det / result / cmc files
   split.py        train_half / val_half
   boxes.py        box formats, IoU
   kalman.py       Kalman filter and box state models
   matching.py     Hungarian assignment
-  trackers/       SORT, ByteTrack, OC-SORT
+  trackers/       SORT, ByteTrack, OC-SORT, BoT-SORT
   tune.py         grid search on train_half
   run.py          runs a tracker over a split, writes the result files
   evaluate.py     TrackEval (HOTA, CLEAR, Identity)
@@ -320,8 +413,10 @@ src/mot_bench/
 tools/
   bytetrack_reference.py   runs the official ByteTrack tracker on the same detections
   ocsort_reference.py      same for OC-SORT
+  botsort_reference.py     same for BoT-SORT
   yolox_detections.py      YOLOX boxes of the ByteTrack ablation model, on a GPU
   motmetrics_eval.py       MOTA / IDF1 / ID switches computed as in ByteTrack
+  reid_features.py         re-ID features of the BoT-SORT model, on a GPU
 ```
 
 ## Data and licences
@@ -331,6 +426,10 @@ tools/
 - YOLOX model: `bytetrack_ablation.pth.tar` from [ifzhang/ByteTrack](https://github.com/ifzhang/ByteTrack) (MIT),
   trained on MOT17 and [CrowdHuman](https://www.crowdhuman.org/), which is for non-commercial research only.
   Neither the weights nor the detections are stored here.
+- Re-ID model: `mot17_sbs_S50.pth` from [NirAharon/BoT-SORT](https://github.com/NirAharon/BoT-SORT) (MIT,
+  with [FastReID](https://github.com/JDAI-CV/fast-reid), Apache-2.0), trained on crops of MOT17 people. The
+  camera motion files come from the same repository. The weights, the features and these files aren't stored
+  here.
 - Code: Apache-2.0.
 
 ## Author

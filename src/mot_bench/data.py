@@ -16,6 +16,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+import numpy as np
 import requests
 
 from mot_bench import mot, split
@@ -154,6 +155,51 @@ def add_detections(data_dir: Path, dataset: str, src_dir: Path, name: str) -> li
         if not (seq_dir / "seqinfo.ini").is_file():
             raise FileNotFoundError(f"no sequence {src.stem} in {train}")
         shutil.copyfile(src, seq_dir / "det" / f"{name}.txt")
+        # features of the old file wouldn't match the new one
+        (seq_dir / "det" / f"{name}.npy").unlink(missing_ok=True)
         added.append(src.stem)
+    split.make_halves(Path(data_dir) / dataset)
+    return added
+
+
+def add_features(data_dir: Path, dataset: str, src_dir: Path, dets: str) -> list[str]:
+    """Copy <src_dir>/<seq>.npy, one re-ID feature per line of det/<dets>.txt, to det/<dets>.npy of each
+    training sequence, then cut the halves again."""
+    train = Path(data_dir) / dataset / "train"
+    added = []
+    for src in sorted(Path(src_dir).glob("*.npy")):
+        det = train / src.stem / "det" / f"{dets}.txt"
+        if not det.is_file():
+            raise FileNotFoundError(f"no {det}")
+        rows = np.load(src, mmap_mode="r").shape[0]
+        lines = len(np.loadtxt(det, delimiter=",", ndmin=1, usecols=0)) if det.stat().st_size else 0
+        if rows != lines:
+            raise ValueError(f"{src.name}: {rows} features for the {lines} lines of {det}")
+        shutil.copyfile(src, det.with_suffix(".npy"))
+        added.append(src.stem)
+    split.make_halves(Path(data_dir) / dataset)
+    return added
+
+
+def add_cmc(data_dir: Path, dataset: str, src_dir: Path, name: str) -> list[str]:
+    """Camera motion from the GMC files of BoT-SORT (tracker/GMC_files/MOTChallenge/GMC-<video>.txt: frame
+    index from 0, then the 2 x 3 map, tab separated) to cmc/<name>.txt of each training sequence of the
+    video, then cut the halves again. The values are copied as written."""
+    train = Path(data_dir) / dataset / "train"
+    added = []
+    for src in sorted(Path(src_dir).glob("GMC-*.txt")):
+        video = src.stem[len("GMC-") :]
+        seqs = sorted(p for p in train.glob(f"{video}*") if (p / "seqinfo.ini").is_file())
+        if not seqs:
+            continue
+        lines = []
+        for line in src.read_text().splitlines():
+            tokens = line.split("\t")
+            if len(tokens) >= 7:
+                lines.append(f"{int(tokens[0]) + 1},{','.join(t.strip() for t in tokens[1:7])}\n")
+        for seq_dir in seqs:
+            (seq_dir / "cmc").mkdir(exist_ok=True)
+            (seq_dir / "cmc" / f"{name}.txt").write_text("".join(lines))
+            added.append(seq_dir.name)
     split.make_halves(Path(data_dir) / dataset)
     return added

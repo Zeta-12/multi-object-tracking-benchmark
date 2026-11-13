@@ -5,6 +5,9 @@ One line per box, comma separated, frames start at 1, boxes are (left, top, widt
     gt.txt       frame, id, x, y, w, h, flag, class, visibility   (flag 0 = not evaluated)
     det.txt      frame, -1, x, y, w, h, score[, -1, -1, -1]
     results      frame, id, x, y, w, h, score, -1, -1, -1
+    cmc/<name>   frame, a, b, tx, c, d, ty   (camera motion from the previous frame: x' = a x + b y + tx, ...)
+
+det/<name>.npy, when there is one, holds a re-ID feature per line of det/<name>.txt, in the same order.
 """
 
 from __future__ import annotations
@@ -83,6 +86,27 @@ def read_det(path: Path) -> np.ndarray:
     return read_txt(path, 7)
 
 
+def read_features(det_path: Path) -> np.ndarray:
+    """The rows of <det>.npy in the order of read_det."""
+    feats = np.load(Path(det_path).with_suffix(".npy"))
+    if Path(det_path).stat().st_size == 0:
+        return feats
+    frames = np.loadtxt(det_path, delimiter=",", ndmin=1, usecols=0)
+    if len(frames) != len(feats):
+        raise ValueError(f"{det_path}: {len(frames)} detections but {len(feats)} features")
+    return feats[np.argsort(frames, kind="stable")]
+
+
+def read_cmc(path: Path, length: int) -> np.ndarray:
+    """(length, 2, 3) camera motion of frames 1..length, no motion for the frames that aren't in the file."""
+    warps = np.tile(np.eye(2, 3), (length, 1, 1))
+    if Path(path).stat().st_size:
+        rows = np.loadtxt(path, delimiter=",", ndmin=2)
+        rows = rows[(rows[:, 0] >= 1) & (rows[:, 0] <= length)]
+        warps[rows[:, 0].astype(int) - 1] = rows[:, 1:7].reshape(-1, 2, 3)
+    return warps
+
+
 def write_results(path: Path, rows: np.ndarray) -> None:
     """rows: frame, id, x, y, w, h, score."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,6 +126,7 @@ class Sequence:
     info: SeqInfo
     img_dir: Path
     dets: str = "det"
+    cmc: str | None = None
 
     @property
     def name(self) -> str:
@@ -113,6 +138,17 @@ class Sequence:
     def det(self) -> np.ndarray:
         """det/det.txt is the public detections, other det/<name>.txt files come from `mot add-dets`."""
         return read_det(self.dir / "det" / f"{self.dets}.txt")
+
+    def features(self) -> np.ndarray | None:
+        """Re-ID features of det(), row for row, or None without det/<dets>.npy."""
+        path = self.dir / "det" / f"{self.dets}.txt"
+        return read_features(path) if path.with_suffix(".npy").is_file() else None
+
+    def warps(self) -> np.ndarray | None:
+        """(length, 2, 3) camera motion from cmc/<cmc>.txt, None if no cmc was asked for."""
+        if self.cmc is None:
+            return None
+        return read_cmc(self.dir / "cmc" / f"{self.cmc}.txt", self.info.length)
 
     def image(self, frame: int) -> Path:
         """Image of `frame`, counted in this sequence (so frame 1 of val_half is the first val image)."""
@@ -128,10 +164,15 @@ def video_name(name: str) -> str:
 
 
 def sequences(
-    data_dir: Path, dataset: str, split: str, detector: str | None = None, dets: str = "det"
+    data_dir: Path,
+    dataset: str,
+    split: str,
+    detector: str | None = None,
+    dets: str = "det",
+    cmc: str | None = None,
 ) -> list[Sequence]:
     """Sequences of <data_dir>/<dataset>/<split>. `detector` keeps one MOT17 copy (DPM, FRCNN or SDP), `dets`
-    the sequences that have det/<dets>.txt."""
+    the sequences that have det/<dets>.txt, `cmc` the ones that have cmc/<cmc>.txt."""
     split_dir = Path(data_dir) / dataset / split
     if not split_dir.is_dir():
         raise FileNotFoundError(f"{split_dir} not found, run `mot download --dataset {dataset}` first")
@@ -142,6 +183,8 @@ def sequences(
             continue
         if not (seq_dir / "det" / f"{dets}.txt").is_file():
             continue
+        if cmc and not (seq_dir / "cmc" / f"{cmc}.txt").is_file():
+            continue
         info = read_seqinfo(seq_dir / "seqinfo.ini")
-        out.append(Sequence(seq_dir, info, source / video_name(info.name) / info.im_dir, dets))
+        out.append(Sequence(seq_dir, info, source / video_name(info.name) / info.im_dir, dets, cmc))
     return out

@@ -4,6 +4,7 @@ tlwh  left, top, width, height (MOTChallenge files)
 tlbr  left, top, right, bottom (what the trackers work with)
 xysr  centre x, centre y, area, aspect ratio w/h (SORT state)
 xyah  centre x, centre y, aspect ratio w/h, height (DeepSORT and ByteTrack state)
+xywh  centre x, centre y, width, height (BoT-SORT state)
 """
 
 from __future__ import annotations
@@ -43,6 +44,16 @@ def xyah_to_tlbr(x: np.ndarray) -> np.ndarray:
     w, h = x[2] * x[3], x[3]
     left, top = x[0] - w / 2, x[1] - h / 2
     return np.array([left, top, left + w, top + h])
+
+
+def tlbr_to_xywh(b: np.ndarray) -> np.ndarray:
+    w, h = b[2] - b[0], b[3] - b[1]
+    return np.array([b[0] + w / 2, b[1] + h / 2, w, h])
+
+
+def xywh_to_tlbr(x: np.ndarray) -> np.ndarray:
+    left, top = x[0] - x[2] / 2, x[1] - x[3] / 2
+    return np.array([left, top, left + x[2], top + x[3]])
 
 
 def iou(a: np.ndarray, b: np.ndarray, plus_one: bool = False) -> np.ndarray:

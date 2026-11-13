@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from mot_bench.boxes import tlbr_to_xyah, tlbr_to_xysr, xyah_to_tlbr, xysr_to_tlbr
+from mot_bench.boxes import tlbr_to_xyah, tlbr_to_xysr, tlbr_to_xywh, xyah_to_tlbr, xysr_to_tlbr, xywh_to_tlbr
 
 
 def predict(x: np.ndarray, P: np.ndarray, F: np.ndarray, Q: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -170,3 +170,51 @@ class XyahBox:
     @property
     def box(self) -> np.ndarray:
         return xyah_to_tlbr(self.x)
+
+
+class XywhBox:
+    """State (x, y, w, h, vx, vy, vw, vh): centre, width and height, with their velocities.
+
+    The model of BoT-SORT. It's the one of DeepSORT with the width in place of the w/h ratio, so that the
+    width of the box follows the detections too. The noise of x and w follows the width, the noise of y and
+    h the height, with the same factors as DeepSORT.
+    """
+
+    F = constant_velocity(4, 4)
+    H = np.eye(4, 8)
+    POS = 1 / 20
+    VEL = 1 / 160
+
+    def __init__(self, box: np.ndarray):
+        z = tlbr_to_xywh(box)
+        w, h = z[2], z[3]
+        self.x = np.r_[z, 0.0, 0.0, 0.0, 0.0]
+        std = [2 * self.POS * w, 2 * self.POS * h, 2 * self.POS * w, 2 * self.POS * h]
+        std += [10 * self.VEL * w, 10 * self.VEL * h, 10 * self.VEL * w, 10 * self.VEL * h]
+        self.P = np.diag(np.square(std))
+
+    def predict(self) -> None:
+        w, h = self.x[2], self.x[3]
+        std = [self.POS * w, self.POS * h, self.POS * w, self.POS * h]
+        std += [self.VEL * w, self.VEL * h, self.VEL * w, self.VEL * h]
+        self.x, self.P = predict(self.x, self.P, self.F, np.diag(np.square(std)))
+
+    def update(self, box: np.ndarray) -> None:
+        w, h = self.x[2], self.x[3]
+        R = np.diag(np.square([self.POS * w, self.POS * h, self.POS * w, self.POS * h]))
+        self.x, self.P = update(self.x, self.P, tlbr_to_xywh(box), self.H, R, joseph=False)
+
+    def warp(self, A: np.ndarray) -> None:
+        """Camera motion: A is the 2 x 3 affine map from the previous frame to this one.
+
+        The linear part turns every (x, y) pair of the state (centre, size and their velocities), the
+        translation only moves the centre.
+        """
+        R = np.kron(np.eye(4), A[:, :2])
+        self.x = R @ self.x
+        self.x[:2] += A[:, 2]
+        self.P = R @ self.P @ R.T
+
+    @property
+    def box(self) -> np.ndarray:
+        return xywh_to_tlbr(self.x)

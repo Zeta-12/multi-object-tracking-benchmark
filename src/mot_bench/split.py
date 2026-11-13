@@ -11,6 +11,8 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
+
 from mot_bench.mot import read_seqinfo, write_seqinfo
 
 
@@ -39,8 +41,18 @@ def _cut_file(src: Path, dst: Path, first: int, last: int) -> int:
     return len(lines)
 
 
+def _cut_features(det: Path, dst: Path, first: int, last: int) -> None:
+    """The rows of <det>.npy whose line of det is kept by cut_lines."""
+    if det.stat().st_size == 0:
+        np.save(dst, np.load(det.with_suffix(".npy")))
+        return
+    frames = np.loadtxt(det, delimiter=",", ndmin=1, usecols=0)
+    np.save(dst, np.load(det.with_suffix(".npy"))[(frames >= first) & (frames <= last)])
+
+
 def make_halves(dataset_dir: Path) -> list[Path]:
-    """Write <dataset_dir>/{train_half,val_half}/<seq>/ (seqinfo, gt, every det file) from <dataset_dir>/train."""
+    """Write <dataset_dir>/{train_half,val_half}/<seq>/ (seqinfo, gt, every det file with its features, every
+    cmc file) from <dataset_dir>/train."""
     written = []
     for seq_dir in sorted(p for p in (Path(dataset_dir) / "train").iterdir() if (p / "seqinfo.ini").is_file()):
         info = read_seqinfo(seq_dir / "seqinfo.ini")
@@ -48,9 +60,13 @@ def make_halves(dataset_dir: Path) -> list[Path]:
             out = Path(dataset_dir) / split / info.name
             half = replace(info, length=last - first + 1, frame_offset=first - 1)
             write_seqinfo(half, out / "seqinfo.ini")
-            files = [seq_dir / "gt" / "gt.txt", *sorted((seq_dir / "det").glob("*.txt"))]
+            dets = sorted((seq_dir / "det").glob("*.txt"))
+            files = [seq_dir / "gt" / "gt.txt", *dets, *sorted((seq_dir / "cmc").glob("*.txt"))]
             for src in files:
                 if src.is_file():
                     _cut_file(src, out / src.relative_to(seq_dir), first, last)
+            for src in dets:
+                if src.with_suffix(".npy").is_file():
+                    _cut_features(src, out / src.relative_to(seq_dir).with_suffix(".npy"), first, last)
             written.append(out)
     return written
